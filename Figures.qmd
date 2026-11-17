@@ -1,0 +1,268 @@
+---
+title: "Diabetes Figures"
+format: html
+jupyter: stor320
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
+
+df = pd.read_csv("BRFSS_2025_NC_Final_Analysis.csv")
+
+df = df.loc[
+    df["Diabetes_Binary"].isin([0, 1])
+    & np.isfinite(df["Survey_Weight"])
+    & (df["Survey_Weight"] > 0)
+].copy()
+
+plt.rcParams.update({
+    "font.size": 11,
+    "figure.dpi": 120
+})
+
+BLUE = "#3274A1"
+ORANGE = "#E18B46"
+
+bmi_order = ["Normal", "Overweight", "Obesity I", "Obesity II+"]
+
+df["BMI_Category"] = pd.cut(
+    df["BMI"],
+    bins=[18.5, 25, 30, 35, np.inf],
+    labels=bmi_order,
+    right=False
+)
+
+df["Smoking_Group"] = df["Smoking_Status"].replace({
+    "Current daily": "Current",
+    "Current some days": "Current"
+})
+
+
+def weighted_prevalence(data, column, categories):
+    """Weighted percentage with diabetes within each category."""
+    results = []
+
+    for category in categories:
+        group = data.loc[data[column] == category]
+
+        if group.empty:
+            results.append(np.nan)
+        else:
+            results.append(
+                100 * np.average(
+                    group["Diabetes_Binary"],
+                    weights=group["Survey_Weight"]
+                )
+            )
+
+    return np.array(results)
+
+
+def prevalence_barplot(ax, categories, values, title, xlabel):
+    ax.bar(categories, values, color=BLUE, width=0.65)
+
+    for position, value in enumerate(values):
+        if np.isfinite(value):
+            ax.annotate(
+                f"{value:.1f}%",
+                xy=(position, value),
+                xytext=(0, 5),
+                textcoords="offset points",
+                ha="center"
+            )
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Diagnosed diabetes prevalence (%)")
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+
+
+def finish_figure(fig):
+    fig.tight_layout
+    plt.show()
+```
+
+# Figure 1: Diabetes prevalence across BMI categories
+How does diagnosed diabetes prevalence vary across BMI categories?
+
+```{python}
+
+bmi_prevalence = weighted_prevalence(
+    df, "BMI_Category", bmi_order
+)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+prevalence_barplot(
+    ax,
+    bmi_order,
+    bmi_prevalence,
+    "Figure 1. Diabetes prevalence across BMI categories",
+    "BMI category"
+)
+
+ax.set_ylim(0, max(5, np.nanmax(bmi_prevalence) * 1.25))
+
+finish_figure(fig)
+```
+
+# Figure 2: Diabetes prevalence by activity and smoking
+How do diabetes prevalence patterns vary by physical activity and smoking status?
+
+```{python}
+activity_order = ["Yes", "No"]
+smoking_order = ["Never", "Former", "Current"]
+
+activity_prevalence = weighted_prevalence(
+    df, "Physical_Activity", activity_order
+)
+
+smoking_prevalence = weighted_prevalence(
+    df, "Smoking_Group", smoking_order
+)
+
+fig, axes = plt.subplots(
+    1, 2,
+    figsize=(11, 5),
+    sharey=True
+)
+
+prevalence_barplot(
+    axes[0],
+    activity_order,
+    activity_prevalence,
+    "A. Physical activity",
+    "Physical activity"
+)
+
+prevalence_barplot(
+    axes[1],
+    smoking_order,
+    smoking_prevalence,
+    "B. Smoking status",
+    "Smoking status"
+)
+
+maximum = np.nanmax(
+    np.concatenate([activity_prevalence, smoking_prevalence])
+)
+axes[0].set_ylim(0, max(5, maximum * 1.25))
+
+fig.suptitle(
+    "Figure 2. Diabetes prevalence by physical activity and smoking"
+)
+
+finish_figure(fig)
+```
+
+# Figure 3: Consumption distributions by diabetes status
+Do reported fruit and vegetable consumption distributions differ by diabetes status?
+
+```{python}
+def weighted_box_statistics(data, column, label):
+    """Calculate weighted quartiles and 1.5-IQR whiskers."""
+    group = (
+        data[[column, "Survey_Weight"]]
+        .dropna()
+        .sort_values(column)
+    )
+
+    if group.empty:
+        raise ValueError(f"No valid observations for {column}: {label}")
+
+    values = group[column].to_numpy()
+    weights = group["Survey_Weight"].to_numpy()
+
+    # Cumulative proportion of total survey weight
+    cumulative_weight = np.cumsum(weights) / weights.sum()
+
+    # Weighted 25th, 50th, and 75th percentiles
+    positions = np.searchsorted(
+        cumulative_weight,
+        [0.25, 0.50, 0.75]
+    )
+    q1, median, q3 = values[positions]
+
+    iqr = q3 - q1
+
+    lower_whisker = values[values >= q1 - 1.5 * iqr].min()
+    upper_whisker = values[values <= q3 + 1.5 * iqr].max()
+
+    outliers = values[
+        (values < lower_whisker) | (values > upper_whisker)
+    ]
+
+    return {
+        "label": label,
+        "q1": q1,
+        "med": median,
+        "q3": q3,
+        "whislo": lower_whisker,
+        "whishi": upper_whisker,
+        "fliers": outliers
+    }
+
+
+fig, axes = plt.subplots(
+    1, 2,
+    figsize=(11, 5),
+    sharey=True
+)
+
+columns = ["Fruit_Times_Per_Day", "Vegetable_Times_Per_Day"]
+titles = ["A. Fruit consumption", "B. Vegetable consumption"]
+
+for ax, column, title in zip(axes, columns, titles):
+    statistics = [
+        weighted_box_statistics(
+            df.loc[df["Diabetes_Binary"] == 0],
+            column,
+            "Without diabetes"
+        ),
+        weighted_box_statistics(
+            df.loc[df["Diabetes_Binary"] == 1],
+            column,
+            "With diabetes"
+        )
+    ]
+
+    boxes = ax.bxp(
+        statistics,
+        patch_artist=True,
+        widths=0.5,
+        medianprops={"color": "black"},
+        flierprops={
+            "marker": "o",
+            "markersize": 3,
+            "alpha": 0.3
+        }
+    )
+
+    for box, color in zip(boxes["boxes"], [BLUE, ORANGE]):
+        box.set_facecolor(color)
+        box.set_alpha(0.75)
+
+    ax.set_title(title)
+    ax.set_xlabel("Diagnosed diabetes status")
+    ax.set_ylim(bottom=0)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+
+axes[0].set_ylabel("Reported consumption frequency (times/day)")
+
+fig.suptitle(
+    "Figure 3. Fruit and vegetable consumption by diabetes status"
+)
+
+finish_figure(fig)
+```
